@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en" xml:lang="en">
+<head>
+    <title>Voice Translation System</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        .section { margin: 20px 0; padding: 20px; border: 1px solid #ddd; border-radius: 5px; }
+        button { padding: 10px 20px; margin: 5px; background: #007bff; color: white; border: none; border-radius: 3px; cursor: pointer; }
+        button:hover { background: #0056b3; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        select, input, textarea { padding: 8px; margin: 5px; border: 1px solid #ddd; border-radius: 3px; }
+        textarea { width: 100%; height: 100px; }
+        .result { background: #f8f9fa; padding: 10px; margin: 10px 0; border-radius: 3px; }
+        .streaming { background: #dc3545; }
+    </style>
+</head>
+<body>
+    <h1>Voice Translation System</h1>
+    
+    <div class="section">
+        <h3>Real-time Voice Streaming</h3>
+        <label for="sourceLanguage">Source Language:</label>
+        <select id="sourceLanguage">
+            <option value="">Auto-detect</option>
+            <option value="en">English</option>
+            <option value="ar">Arabic</option>
+        </select>
+        <label for="targetLanguage">Display In:</label>
+        <select id="targetLanguage">
+            <option value="en">English</option>
+            <option value="ar">Arabic</option>
+        </select>
+        <button id="streamBtn" onclick="toggleStreaming()">Start Streaming</button>
+        <div id="streamingStatus"></div>
+        <div id="transcriptionResult" class="result" style="display:none;"></div>
+    </div>
+
+    <div class="section">
+        <h3>File Upload & Transcription</h3>
+        <input type="file" id="audioFile" accept="audio/*">
+        <button onclick="transcribeFile()">Transcribe</button>
+        <div id="fileResult" class="result" style="display:none;"></div>
+    </div>
+
+    <div class="section">
+        <h3>Text Translation</h3>
+        <textarea id="textInput" placeholder="Enter text to translate..."></textarea><br>
+        <select id="sourceLang">
+            <option value="en">English</option>
+            <option value="ar">Arabic</option>
+        </select>
+        <span>→</span>
+        <select id="targetLang">
+            <option value="ar">Arabic</option>
+            <option value="en">English</option>
+        </select>
+        <button onclick="translateText()">Translate</button>
+        <div id="translationResult" class="result" style="display:none;"></div>
+    </div>
+
+    <script>
+        let mediaRecorder;
+        let audioChunks = [];
+        let isStreaming = false;
+        let streamInterval;
+
+        async function toggleStreaming() {
+            const btn = document.getElementById('streamBtn');
+            const status = document.getElementById('streamingStatus');
+            
+            if (!isStreaming) {
+                try {
+                    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                        throw new Error('Microphone access not supported.');
+                    }
+                    
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    mediaRecorder = new MediaRecorder(stream);
+                    audioChunks = [];
+                    
+                    mediaRecorder.ondataavailable = event => {
+                        if (event.data.size > 0) {
+                            audioChunks.push(event.data);
+                        }
+                    };
+                    
+                    // Start continuous recording with 2-second chunks for real-time
+                    mediaRecorder.start(2000);
+                    isStreaming = true;
+                    btn.textContent = 'Stop Streaming';
+                    btn.classList.add('streaming');
+                    status.textContent = 'Streaming...';
+                    
+                    // Process audio chunks every 2 seconds for real-time
+                    streamInterval = setInterval(async () => {
+                        if (audioChunks.length > 0) {
+                            const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+                            audioChunks = [];
+                            await processAudio(audioBlob);
+                        }
+                    }, 2000);
+                    
+                } catch (err) {
+                    status.textContent = 'Microphone access failed. Use file upload instead.';
+                }
+            } else {
+                clearInterval(streamInterval);
+                mediaRecorder.stop();
+                mediaRecorder.stream.getTracks().forEach(track => track.stop());
+                isStreaming = false;
+                btn.textContent = 'Start Streaming';
+                btn.classList.remove('streaming');
+                status.textContent = '';
+            }
+        }
+
+        async function processAudio(audioBlob) {
+            const formData = new FormData();
+            formData.append('file', audioBlob, 'stream.wav');
+            
+            const sourceLanguage = document.getElementById('sourceLanguage').value;
+            const targetLanguage = document.getElementById('targetLanguage').value;
+            
+            if (sourceLanguage) formData.append('source_language', sourceLanguage);
+            formData.append('target_language', targetLanguage);
+            
+            try {
+                const response = await fetch('/transcribe-translate', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`Server error: ${response.status}`);
+                }
+                
+                const result = await response.json();
+                console.log('Server response:', result); // Debug log
+
+                // server returns original_text/translated_text for transcribe-translate
+                if (result.original_text && result.original_text.trim()) {
+                    displayLiveResult('transcriptionResult', result);
+                } else if (result.text && result.text.trim()) {
+                    // fallback for /transcribe endpoint shape
+                    displayLiveResult('transcriptionResult', { original_text: result.text, translated_text: result.text });
+                } else {
+                    console.log('No text detected in audio chunk');
+                    console.log('Full result:', result);
+                }
+            } catch (err) {
+                console.error('Streaming error:', err);
+                const element = document.getElementById('transcriptionResult');
+                element.style.display = 'block';
+                element.innerHTML += `<div>[${new Date().toLocaleTimeString()}] <strong>Error:</strong> ${err.message}</div>`;
+            }
+        }
+
+        async function transcribeFile() {
+            const fileInput = document.getElementById('audioFile');
+            if (!fileInput.files[0]) {
+                alert('Please select an audio file');
+                return;
+            }
+            
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+            
+            try {
+                const response = await fetch('/transcribe', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const result = await response.json();
+                displayResult('fileResult', result);
+            } catch (err) {
+                alert('Error: ' + err.message);
+            }
+        }
+
+        async function translateText() {
+            const text = document.getElementById('textInput').value;
+            if (!text.trim()) {
+                alert('Please enter text to translate');
+                return;
+            }
+            
+            const formData = new FormData();
+            formData.append('text', text);
+            formData.append('source_language', document.getElementById('sourceLang').value);
+            formData.append('target_language', document.getElementById('targetLang').value);
+            
+            try {
+                const response = await fetch('/translate', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const result = await response.json();
+                displayResult('translationResult', result);
+            } catch (err) {
+                alert('Error: ' + err.message);
+            }
+        }
+
+        function displayResult(elementId, result) {
+            const element = document.getElementById(elementId);
+            element.style.display = 'block';
+            
+            if (result.status && result.status !== 'success') {
+                element.innerHTML = `<strong>Error:</strong> ${result.detail || JSON.stringify(result)}`;
+                return;
+            }
+
+            if (result.text) {
+                element.innerHTML = `<strong>Transcription:</strong> ${result.text}<br><strong>Language:</strong> ${result.detected_language || 'unknown'}`;
+                return;
+            }
+
+            if (result.original_text !== undefined && result.translated_text !== undefined) {
+                element.innerHTML = `<strong>Original (${result.source_language || 'unknown'}):</strong> ${result.original_text}<br><strong>Translation (${result.target_language || 'unknown'}):</strong> ${result.translated_text}`;
+                return;
+            }
+
+            element.innerHTML = `<pre>${JSON.stringify(result, null, 2)}</pre>`;
+        }
+        
+        function displayLiveResult(elementId, result) {
+            const element = document.getElementById(elementId);
+            element.style.display = 'block';
+            
+            const timestamp = new Date().toLocaleTimeString();
+            
+            if (result.original_text && result.original_text.trim()) {
+                const entry = `<div style="margin: 5px 0; padding: 5px; border-left: 3px solid #007bff;">[${timestamp}] <strong>Original:</strong> ${result.original_text}<br><strong>Translation:</strong> ${result.translated_text || result.original_text}</div>`;
+                element.innerHTML += entry;
+                element.scrollTop = element.scrollHeight;
+            }
+        }
+    </script>
+</body>
+</html>

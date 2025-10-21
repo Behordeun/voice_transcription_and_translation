@@ -1,0 +1,30 @@
+services:
+  voice-translation:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+      - "8765:8765"
+    environment:
+      - PRODUCTION=true
+      - TORCH_NUM_THREADS=2
+      - OMP_NUM_THREADS=2
+    volumes:
+      - ./logs:/app/logs
+      - model_cache:/root/.cache
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 1G
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  model_cache:
