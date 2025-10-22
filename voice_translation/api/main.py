@@ -1,11 +1,14 @@
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..core.audio_utils import load_audio_data
 from ..core.error_trace import logger
 from ..core.processor import VoiceProcessor
+import json
+import base64
+import numpy as np
 
 load_dotenv()
 
@@ -285,3 +288,141 @@ async def health_check():
 async def get_supported_languages():
     """Get supported languages"""
     return {"supported_languages": {"en": "English", "ar": "Arabic"}}
+
+
+class _WSHandler:
+    def __init__(self, websocket):
+        self.websocket = websocket
+        self.buffer_bytes = bytearray()
+        self.config = {"source_language": None, "target_language": None}
+
+    async def accept(self):
+        await self.websocket.accept()
+
+    async def send_json(self, obj):
+        await self.websocket.send_text(json.dumps(obj))
+
+    async def handle_config(self, data):
+        self.config["source_language"] = data.get("source_language")
+        self.config["target_language"] = data.get("target_language")
+        await self.send_json({"type": "config_ack", "config": self.config})
+
+    async def handle_chunk(self, data):
+        enc = data.get("encoding", "base64")
+        if enc != "base64":
+            await self.send_json({"type": "error", "detail": "unsupported_encoding"})
+            return
+
+        chunk_b64 = data.get("data")
+        if not chunk_b64:
+            return
+
+        try:
+            chunk = base64.b64decode(chunk_b64)
+        except Exception:
+            await self.send_json({"type": "error", "detail": "invalid_base64"})
+            return
+
+        self.buffer_bytes.extend(chunk)
+        await self._maybe_send_interim()
+
+    async def _maybe_send_interim(self):
+        # If buffer is reasonably large, attempt to load and transcribe
+        if len(self.buffer_bytes) <= 16000 * 1:
+            return
+
+        audio_array = load_audio_data(bytes(self.buffer_bytes), sr=16000)
+        if getattr(audio_array, "size", 0) > 0:
+            text, detected = processor.transcribe_audio(audio_array, self.config.get("source_language"))
+            if text and text.strip():
+                await self.send_json({"type": "interim", "text": text, "detected_language": detected})
+
+        # keep a sliding window: drop older half to reduce latency (in-place)
+        keep_from = int(len(self.buffer_bytes) / 2)
+        del self.buffer_bytes[:keep_from]
+
+    async def handle_flush(self):
+        audio_array = load_audio_data(bytes(self.buffer_bytes), sr=16000)
+        if getattr(audio_array, "size", 0) == 0:
+            await self.send_json({
+                "type": "final",
+                "original_text": "",
+                "translated_text": "",
+                "detected_language": "unknown",
+                "target_language": self.config.get("target_language")
+            })
+            self.buffer_bytes.clear()
+            return
+
+        text, detected = processor.transcribe_audio(audio_array, self.config.get("source_language"))
+        translated_text = text
+        tgt = self.config.get("target_language")
+        if tgt and detected != tgt and text.strip():
+            translated_text = processor.translate_text(text, detected, tgt)
+
+        await self.send_json({
+            "type": "final",
+            "original_text": text,
+            "translated_text": translated_text,
+            "detected_language": detected,
+            "target_language": tgt,
+        })
+        self.buffer_bytes.clear()
+
+    async def process_text_message(self, msg: str):
+        """Parse incoming text message and dispatch to appropriate handler.
+           Returns 'closed' when client requested close, otherwise None."""
+        try:
+            data = json.loads(msg)
+        except Exception:
+            await self.send_json({"type": "error", "detail": "invalid_json"})
+            return
+
+        mtype = data.get("type")
+        if mtype == "config":
+            await self.handle_config(data)
+        elif mtype == "chunk":
+            await self.handle_chunk(data)
+        elif mtype == "flush":
+            await self.handle_flush()
+        elif mtype == "close":
+            # close and signal caller to stop loop
+            await self.websocket.close()
+            return "closed"
+        else:
+            await self.send_json({"type": "error", "detail": "unknown_message_type"})
+
+
+@app.websocket("/ws/transcribe-translate")
+async def websocket_transcribe_translate(websocket: WebSocket):
+    """WebSocket endpoint for real-time streaming transcription + translation.
+
+    Protocol (JSON messages):
+    - Client -> Server:
+      {"type": "config", "source_language": "en"}  # optional
+      {"type": "chunk", "encoding": "base64", "data": "..."}  # audio bytes (wav or raw PCM)
+      {"type": "flush"}  # ask server to process buffered audio immediately
+      {"type": "close"}  # close the socket gracefully
+
+    - Server -> Client:
+      {"type": "interim", "text": "partial transcription", "detected_language": "en"}
+      {"type": "final", "original_text": "...", "translated_text": "...", "detected_language": "en", "target_language": "ar"}
+    """
+    handler = _WSHandler(websocket)
+    await handler.accept()
+
+    try:
+        while True:
+            msg = await websocket.receive_text()
+            result = await handler.process_text_message(msg)
+            if result == "closed":
+                return
+
+    except WebSocketDisconnect:
+        logger.info("WebSocket client disconnected")
+    except Exception as e:
+        logger.error(e, {"component": "ws_transcribe_translate"}, exc_info=True)
+        try:
+            await websocket.send_text(json.dumps({"type": "error", "detail": str(e)}))
+        except Exception:
+            pass

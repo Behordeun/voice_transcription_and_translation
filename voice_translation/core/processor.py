@@ -7,6 +7,7 @@ import whisper
 from transformers import MarianMTModel, MarianTokenizer
 
 from .error_trace import logger
+import re
 
 
 class VoiceProcessor:
@@ -24,7 +25,7 @@ class VoiceProcessor:
         torch.set_num_threads(2)  # Limit CPU threads for better performance
 
         try:
-            self.whisper_model = whisper.load_model("tiny", device=self.device)
+            self.whisper_model = whisper.load_model("base", device=self.device)
             # Optimize Whisper for inference
             if hasattr(self.whisper_model, "eval"):
                 self.whisper_model.eval()
@@ -131,6 +132,23 @@ class VoiceProcessor:
         # Fallback to single speaker
         return {"speaker_0": [audio_data]}
 
+    def _clean_transcription(self, text):
+        """Clean transcription text by removing unwanted delimiters and artifacts"""
+        if not text:
+            return text
+        
+        # Remove multiple consecutive slashes (2 or more) with surrounding spaces
+        # This handles: / /, / / /, / / / /, etc.
+        text = re.sub(r'(\s*/\s*){2,}', ' ', text)
+        
+        # Remove multiple spaces
+        text = re.sub(r'\s+', ' ', text)
+        
+        # Clean up spacing around punctuation
+        text = re.sub(r'\s+([.,!?;:])', r'\1', text)
+        
+        return text.strip()
+
     def transcribe_audio(self, audio_data, language=None):
         try:
             # Quick validation
@@ -158,6 +176,7 @@ class VoiceProcessor:
                 )
 
             text = result["text"].strip()
+            text = self._clean_transcription(text)  # Clean the transcription
             detected_lang = result.get("language", "en")
 
             # Validate detected language

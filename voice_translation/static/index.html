@@ -66,9 +66,8 @@
 
     <script>
         let mediaRecorder;
-        let audioChunks = [];
         let isStreaming = false;
-        let streamInterval;
+        let ws = null;
 
         async function toggleStreaming() {
             const btn = document.getElementById('streamBtn');
@@ -80,85 +79,90 @@
                         throw new Error('Microphone access not supported.');
                     }
                     
-                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                    mediaRecorder = new MediaRecorder(stream);
-                    audioChunks = [];
+                    // Connect WebSocket
+                    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                    ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws/transcribe-translate`);
                     
-                    mediaRecorder.ondataavailable = event => {
-                        if (event.data.size > 0) {
-                            audioChunks.push(event.data);
+                    ws.onopen = async () => {
+                        // Send config
+                        const sourceLanguage = document.getElementById('sourceLanguage').value;
+                        const targetLanguage = document.getElementById('targetLanguage').value;
+                        ws.send(JSON.stringify({
+                            type: 'config',
+                            source_language: sourceLanguage || null,
+                            target_language: targetLanguage
+                        }));
+                        
+                        // Start recording
+                        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                        mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+                        
+                        mediaRecorder.ondataavailable = async (event) => {
+                            if (event.data.size > 0 && ws.readyState === WebSocket.OPEN) {
+                                const reader = new FileReader();
+                                reader.onloadend = () => {
+                                    const base64 = reader.result.split(',')[1];
+                                    ws.send(JSON.stringify({
+                                        type: 'chunk',
+                                        encoding: 'base64',
+                                        data: base64
+                                    }));
+                                };
+                                reader.readAsDataURL(event.data);
+                            }
+                        };
+                        
+                        mediaRecorder.start(1000); // Send chunks every second
+                        isStreaming = true;
+                        btn.textContent = 'Stop Streaming';
+                        btn.classList.add('streaming');
+                        status.textContent = 'Streaming...';
+                    };
+                    
+                    ws.onmessage = (event) => {
+                        const data = JSON.parse(event.data);
+                        if (data.type === 'interim' || data.type === 'final') {
+                            displayLiveResult('transcriptionResult', data);
+                        } else if (data.type === 'error') {
+                            console.error('WebSocket error:', data.detail);
                         }
                     };
                     
-                    // Start continuous recording with 2-second chunks for real-time
-                    mediaRecorder.start(2000);
-                    isStreaming = true;
-                    btn.textContent = 'Stop Streaming';
-                    btn.classList.add('streaming');
-                    status.textContent = 'Streaming...';
+                    ws.onerror = (error) => {
+                        console.error('WebSocket error:', error);
+                        status.textContent = 'Connection error. Please try again.';
+                        stopStreaming();
+                    };
                     
-                    // Process audio chunks every 2 seconds for real-time
-                    streamInterval = setInterval(async () => {
-                        if (audioChunks.length > 0) {
-                            const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
-                            audioChunks = [];
-                            await processAudio(audioBlob);
+                    ws.onclose = () => {
+                        if (isStreaming) {
+                            status.textContent = 'Connection closed.';
+                            stopStreaming();
                         }
-                    }, 2000);
+                    };
                     
                 } catch (err) {
                     status.textContent = 'Microphone access failed. Use file upload instead.';
+                    console.error(err);
                 }
             } else {
-                clearInterval(streamInterval);
-                mediaRecorder.stop();
-                mediaRecorder.stream.getTracks().forEach(track => track.stop());
-                isStreaming = false;
-                btn.textContent = 'Start Streaming';
-                btn.classList.remove('streaming');
-                status.textContent = '';
+                stopStreaming();
             }
         }
-
-        async function processAudio(audioBlob) {
-            const formData = new FormData();
-            formData.append('file', audioBlob, 'stream.wav');
-            
-            const sourceLanguage = document.getElementById('sourceLanguage').value;
-            const targetLanguage = document.getElementById('targetLanguage').value;
-            
-            if (sourceLanguage) formData.append('source_language', sourceLanguage);
-            formData.append('target_language', targetLanguage);
-            
-            try {
-                const response = await fetch('/transcribe-translate', {
-                    method: 'POST',
-                    body: formData
-                });
-                
-                if (!response.ok) {
-                    throw new Error(`Server error: ${response.status}`);
-                }
-                
-                const result = await response.json();
-                console.log('Server response:', result); // Debug log
-
-                // server returns original_text/translated_text for transcribe-translate
-                if (result.original_text && result.original_text.trim()) {
-                    displayLiveResult('transcriptionResult', result);
-                } else if (result.text && result.text.trim()) {
-                    // fallback for /transcribe endpoint shape
-                    displayLiveResult('transcriptionResult', { original_text: result.text, translated_text: result.text });
-                } else {
-                    console.log('No text detected in audio chunk');
-                    console.log('Full result:', result);
-                }
-            } catch (err) {
-                console.error('Streaming error:', err);
-                const element = document.getElementById('transcriptionResult');
-                element.style.display = 'block';
-                element.innerHTML += `<div>[${new Date().toLocaleTimeString()}] <strong>Error:</strong> ${err.message}</div>`;
+        
+        function stopStreaming() {
+            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                mediaRecorder.stop();
+                mediaRecorder.stream.getTracks().forEach(track => track.stop());
             }
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'flush' }));
+                ws.send(JSON.stringify({ type: 'close' }));
+            }
+            isStreaming = false;
+            document.getElementById('streamBtn').textContent = 'Start Streaming';
+            document.getElementById('streamBtn').classList.remove('streaming');
+            document.getElementById('streamingStatus').textContent = '';
         }
 
         async function transcribeFile() {
@@ -237,14 +241,24 @@
             element.innerHTML = `<pre>${JSON.stringify(result, null, 2)}</pre>`;
         }
         
-        function displayLiveResult(elementId, result) {
+        function displayLiveResult(elementId, data) {
             const element = document.getElementById(elementId);
             element.style.display = 'block';
-            
             const timestamp = new Date().toLocaleTimeString();
             
-            if (result.original_text && result.original_text.trim()) {
-                const entry = `<div style="margin: 5px 0; padding: 5px; border-left: 3px solid #007bff;">[${timestamp}] <strong>Original:</strong> ${result.original_text}<br><strong>Translation:</strong> ${result.translated_text || result.original_text}</div>`;
+            if (data.type === 'interim' && data.text && data.text.trim()) {
+                // Show interim results in lighter style
+                const entry = `<div style="margin: 5px 0; padding: 5px; border-left: 3px solid #6c757d; opacity: 0.7;">[${timestamp}] <em>Interim:</em> ${data.text}</div>`;
+                element.innerHTML += entry;
+                element.scrollTop = element.scrollHeight;
+            } else if (data.type === 'final' && data.original_text && data.original_text.trim()) {
+                // Show final results in bold style
+                const entry = `<div style="margin: 5px 0; padding: 5px; border-left: 3px solid #007bff;">[${timestamp}] <strong>Original:</strong> ${data.original_text}<br><strong>Translation:</strong> ${data.translated_text || data.original_text}</div>`;
+                element.innerHTML += entry;
+                element.scrollTop = element.scrollHeight;
+            } else if (data.original_text && data.original_text.trim()) {
+                // Fallback for HTTP endpoint responses
+                const entry = `<div style="margin: 5px 0; padding: 5px; border-left: 3px solid #007bff;">[${timestamp}] <strong>Original:</strong> ${data.original_text}<br><strong>Translation:</strong> ${data.translated_text || data.original_text}</div>`;
                 element.innerHTML += entry;
                 element.scrollTop = element.scrollHeight;
             }
