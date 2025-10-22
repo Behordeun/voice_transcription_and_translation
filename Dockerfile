@@ -22,5 +22,9 @@ RUN mkdir -p logs
 # Expose ports
 EXPOSE 8000 8765
 
+# Healthcheck configuration
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
 # Run the application
 CMD ["python", "-m", "voice_translation.api"]

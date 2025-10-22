@@ -207,6 +207,9 @@ class VoiceProcessor:
         if not text or not text.strip() or src_lang == tgt_lang:
             return text
 
+        # Clean input text before translation
+        text = self._clean_transcription(text)
+
         model_key = f"{src_lang}-{tgt_lang}"
 
         if model_key not in self.translation_models:
@@ -242,7 +245,9 @@ class VoiceProcessor:
                 if translated:
                     translated_parts.append(translated)
 
-            return ' '.join(translated_parts) if translated_parts else text
+            result = ' '.join(translated_parts) if translated_parts else text
+            # Clean the translated output as well
+            return self._clean_transcription(result)
 
         except Exception as e:
             logger.error(e, {"component": "translation"})

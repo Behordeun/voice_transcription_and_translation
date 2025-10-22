@@ -1,6 +1,6 @@
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..core.audio_utils import load_audio_data
@@ -279,9 +279,35 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
-    logger.debug("Health check requested")
-    return {"status": "healthy", "service": "voice-translation-api"}
+    """Health check endpoint with model validation"""
+    try:
+        # Check if Whisper model is loaded
+        if not hasattr(processor, 'whisper_model') or processor.whisper_model is None:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "unhealthy", "reason": "whisper_model_not_loaded"}
+            )
+        
+        # Check if translation models are loaded
+        if not processor.translation_models:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "unhealthy", "reason": "translation_models_not_loaded"}
+            )
+        
+        return {
+            "status": "healthy",
+            "service": "voice-translation-api",
+            "models": {
+                "whisper": "loaded",
+                "translation_pairs": list(processor.translation_models.keys())
+            }
+        }
+    except Exception:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unhealthy", "reason": "internal_error"}
+        )
 
 
 @app.get("/languages")
