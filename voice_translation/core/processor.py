@@ -196,28 +196,34 @@ class VoiceProcessor:
         try:
             tokenizer, model = self.translation_models[model_key]
 
-            # Optimized tokenization
-            inputs = tokenizer(
-                text,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=256,  # Reduced for speed
-            ).to(self.device)
+            # Split long text into sentences for better translation
+            sentences = text.replace('؟', '؟|').replace('?', '?|').replace('.', '.|').replace('!', '!|').split('|')
+            sentences = [s.strip() for s in sentences if s.strip()]
+            
+            translated_parts = []
+            for sentence in sentences:
+                inputs = tokenizer(
+                    sentence,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                    max_length=512,
+                ).to(self.device)
 
-            # Generate translation
-            with torch.no_grad():
-                outputs = model.generate(
-                    **inputs,
-                    max_length=128,
-                    num_beams=5,
-                    no_repeat_ngram_size=2,
-                    early_stopping=True,
-                    pad_token_id=tokenizer.pad_token_id,
-                )
+                with torch.no_grad():
+                    outputs = model.generate(
+                        **inputs,
+                        max_length=512,
+                        num_beams=4,
+                        early_stopping=True,
+                        pad_token_id=tokenizer.pad_token_id,
+                    )
 
-            translated = tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
-            return translated if translated else text
+                translated = tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
+                if translated:
+                    translated_parts.append(translated)
+
+            return ' '.join(translated_parts) if translated_parts else text
 
         except Exception as e:
             logger.error(e, {"component": "translation"})
