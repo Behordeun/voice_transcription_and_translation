@@ -59,25 +59,29 @@ class VoiceProcessor:
             # Only load supported language pairs
             supported_pairs = [("ar", "en"), ("en", "ar")]
             if (src_lang, tgt_lang) not in supported_pairs:
-                logger.warning(f"Unsupported language pair: {src_lang}-{tgt_lang}")
+                print(f"WARNING: Unsupported language pair: {src_lang}-{tgt_lang}")
                 return
 
             try:
-                model_name = f"Helsinki-NLP/opus-mt-{src_lang}-{tgt_lang}"
-                logger.info(f"Loading translation model: {model_name}")
+                # Use better model names
+                if src_lang == "en" and tgt_lang == "ar":
+                    model_name = "Helsinki-NLP/opus-mt-en-ar"
+                elif src_lang == "ar" and tgt_lang == "en":
+                    model_name = "Helsinki-NLP/opus-mt-ar-en"
+                else:
+                    model_name = f"Helsinki-NLP/opus-mt-{src_lang}-{tgt_lang}"
+                
+                print(f"Loading translation model: {model_name}")
                 tokenizer = MarianTokenizer.from_pretrained(model_name)
-                model = MarianMTModel.from_pretrained(
-                    model_name,
-                    torch_dtype=torch.float16,  # Use FP16 for speed
-                    device_map=self.device,
-                )
-                model.eval()  # Set to evaluation mode
+                model = MarianMTModel.from_pretrained(model_name)
+                model.to(self.device)
+                model.eval()
                 self.translation_models[model_key] = (tokenizer, model)
-                logger.info(
-                    "Successfully loaded translation model", {"model": model_key}
-                )
+                print(f"Successfully loaded translation model: {model_key}")
             except Exception as e:
-                logger.error(e, {"model": model_key, "model_name": model_name})
+                print(f"ERROR loading model {model_key}: {str(e)}")
+                import traceback
+                traceback.print_exc()
 
     def _load_diarization_pipeline(self):
         if self.hf_token:
@@ -201,24 +205,18 @@ class VoiceProcessor:
                 max_length=256,  # Reduced for speed
             ).to(self.device)
 
-            # Fast generation with minimal settings
+            # Generate translation
             with torch.no_grad():
                 outputs = model.generate(
                     **inputs,
-                    max_length=32,  # Very short for real-time
-                    num_beams=1,  # Greedy decoding
-                    do_sample=False,
+                    max_length=128,
+                    num_beams=5,
+                    no_repeat_ngram_size=2,
+                    early_stopping=True,
                     pad_token_id=tokenizer.pad_token_id,
                 )
 
-            translated = tokenizer.decode(outputs[0], skip_special_tokens=True)
-
-            # Quick cleanup
-            translated = translated.replace("*", "").strip()
-            words = translated.split()
-            if len(words) > 1 and words[0] == words[1]:
-                translated = " ".join(words[1:])
-
+            translated = tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
             return translated if translated else text
 
         except Exception as e:

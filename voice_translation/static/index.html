@@ -38,6 +38,12 @@
     <div class="section">
         <h3>File Upload & Transcription</h3>
         <input type="file" id="audioFile" accept="audio/*">
+        <label for="fileTargetLanguage">Target Language:</label>
+        <select id="fileTargetLanguage">
+            <option value="">Same as detected</option>
+            <option value="en">English</option>
+            <option value="ar">Arabic</option>
+        </select>
         <button onclick="transcribeFile()">Transcribe</button>
         <div id="fileResult" class="result" style="display:none;"></div>
     </div>
@@ -165,6 +171,9 @@
             const formData = new FormData();
             formData.append('file', fileInput.files[0]);
             
+            const targetLanguage = document.getElementById('fileTargetLanguage').value;
+            if (targetLanguage) formData.append('target_language', targetLanguage);
+            
             try {
                 const response = await fetch('/transcribe', {
                     method: 'POST',
@@ -213,7 +222,10 @@
             }
 
             if (result.text) {
-                element.innerHTML = `<strong>Transcription:</strong> ${result.text}<br><strong>Language:</strong> ${result.detected_language || 'unknown'}`;
+                const langInfo = result.target_language && result.target_language !== result.detected_language 
+                    ? `${result.detected_language} → ${result.target_language}` 
+                    : result.detected_language || 'unknown';
+                element.innerHTML = `<strong>Transcription:</strong> ${result.text}<br><strong>Language:</strong> ${langInfo}`;
                 return;
             }
 

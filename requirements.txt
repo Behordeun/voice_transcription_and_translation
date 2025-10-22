@@ -7,5 +7,14 @@ uvicorn>=0.24.0
 python-multipart>=0.0.6
 numpy>=1.24.0
 librosa>=0.10.0
+soundfile>=0.12.0
 python-dotenv>=1.0.0
 sentencepiece>=0.1.99
+autoflake
+black
+isort
+sacremoses
+pyannote.audio
+torchaudio>=2.0.0
+ffmpeg-python>=0.2.0
+PySoundFile

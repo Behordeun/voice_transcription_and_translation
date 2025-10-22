@@ -20,18 +20,25 @@ except Exception as e:
     raise
 
 # Mount static files
-app.mount("/static", StaticFiles(directory="voice_translation/static"), name="static")
+import os
+static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
+app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 
 @app.post("/transcribe")
-async def transcribe_audio(file: UploadFile = File(...), language: str = Form(None)):
-    """Transcribe audio file"""
+async def transcribe_audio(
+    file: UploadFile = File(...),
+    language: str = Form(None),
+    target_language: str = Form(None),
+):
+    """Transcribe audio file with optional target language translation"""
     logger.info(
         "Transcription request received",
         {
             "filename": file.filename,
             "content_type": file.content_type,
             "language": language,
+            "target_language": target_language,
         },
     )
 
@@ -41,12 +48,25 @@ async def transcribe_audio(file: UploadFile = File(...), language: str = Form(No
 
         text, detected_lang = processor.transcribe_audio(audio_array, language)
 
+        # Translate if target language is specified and different from detected
+        if target_language and detected_lang != target_language and text.strip():
+            text = processor.translate_text(text, detected_lang, target_language)
+
         logger.info(
             "Transcription completed successfully",
-            {"detected_language": detected_lang, "text_length": len(text)},
+            {
+                "detected_language": detected_lang,
+                "target_language": target_language,
+                "text_length": len(text),
+            },
         )
 
-        return {"text": text, "detected_language": detected_lang, "status": "success"}
+        return {
+            "text": text,
+            "detected_language": detected_lang,
+            "target_language": target_language or detected_lang,
+            "status": "success",
+        }
     except Exception as e:
         logger.error(
             e,
@@ -54,6 +74,7 @@ async def transcribe_audio(file: UploadFile = File(...), language: str = Form(No
                 "endpoint": "/transcribe",
                 "filename": file.filename,
                 "language": language,
+                "target_language": target_language,
             },
             exc_info=True,
         )
@@ -249,7 +270,8 @@ async def process_multi_speaker(
 @app.get("/")
 async def root():
     """Serve the main UI page"""
-    return FileResponse("voice_translation/static/index.html")
+    index_path = os.path.join(static_dir, "index.html")
+    return FileResponse(index_path)
 
 
 @app.get("/health")
