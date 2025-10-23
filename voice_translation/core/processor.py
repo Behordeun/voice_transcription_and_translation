@@ -203,8 +203,12 @@ class VoiceProcessor:
         # 3. Standalone between punctuation
         
         # Pattern: (sentence boundary) filler (comma/period)
-        text = re.sub(r'(?:^|(?<=[.!?])\s+)(um+|uh+|ah+|er+|hmm+|uh-huh|mm-hmm|yeah|yep)[.,]?\s+', ' ', text, flags=re.IGNORECASE)
-        text = re.sub(r'\s+(um+|uh+|ah+|er+|hmm+)[.,]\s+', ' ', text, flags=re.IGNORECASE)
+        # Split complex pattern into two simpler patterns to reduce regex complexity:
+        # 1) Hyphenated fillers (e.g., "uh-huh", "mm-hmm")
+        text = re.sub(r'(?:^|(?<=[.!?])\s+)(?:uh-huh|mm-hmm)[\.,]?\s+', ' ', text, flags=re.IGNORECASE)
+        # 2) Repeated-letter or short fillers (e.g., "um", "uh", "ah", "er", "hmm", "yeah", "yep")
+        text = re.sub(r'(?:^|(?<=[.!?])\s+)(?:um+|uh+|ah+|er+|hmm+|yeah|yep)[\.,]?\s+', ' ', text, flags=re.IGNORECASE)
+        text = re.sub(r'\s+(?:um+|uh+|ah+|er+|hmm+)[\.,]\s+', ' ', text, flags=re.IGNORECASE)
         
         # Remove only when clearly filler usage (with comma)
         text = re.sub(r',\s*(okay|ok|yeah|right|well|so|like)\s*,', ',', text, flags=re.IGNORECASE)

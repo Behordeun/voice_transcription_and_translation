@@ -84,24 +84,56 @@
                     ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws/transcribe-translate`);
                     
                     ws.onopen = async () => {
+                        console.log('WebSocket connected');
                         // Send config
                         const sourceLanguage = document.getElementById('sourceLanguage').value;
                         const targetLanguage = document.getElementById('targetLanguage').value;
-                        ws.send(JSON.stringify({
+                        const config = {
                             type: 'config',
                             source_language: sourceLanguage || null,
                             target_language: targetLanguage
-                        }));
+                        };
+                        console.log('Sending config:', config);
+                        ws.send(JSON.stringify(config));
                         
                         // Start recording
+                        console.log('Requesting microphone access...');
                         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                        mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+                        console.log('Microphone access granted');
+                        // Safari compatibility - try multiple codecs
+                        let mimeType = '';
+                        const codecs = [
+                            'audio/webm;codecs=opus',
+                            'audio/webm',
+                            'audio/mp4',
+                            'audio/ogg;codecs=opus'
+                        ];
+                        
+                        for (const codec of codecs) {
+                            if (MediaRecorder.isTypeSupported(codec)) {
+                                mimeType = codec;
+                                break;
+                            }
+                        }
+                        
+                        if (!mimeType) {
+                            // Use default
+                            mediaRecorder = new MediaRecorder(stream);
+                            console.log('Using default codec');
+                        } else {
+                            mediaRecorder = new MediaRecorder(stream, { mimeType: mimeType });
+                            console.log('Using codec:', mimeType);
+                        }
+                        console.log('MediaRecorder created');
                         
                         mediaRecorder.ondataavailable = async (event) => {
+                            console.log('ondataavailable fired, size:', event.data.size);
                             if (event.data.size > 0 && ws.readyState === WebSocket.OPEN) {
+                                console.log('Sending audio chunk:', event.data.size, 'bytes');
                                 const reader = new FileReader();
                                 reader.onloadend = () => {
                                     const base64 = reader.result.split(',')[1];
+                                    console.log('Base64 length:', base64.length);
                                     ws.send(JSON.stringify({
                                         type: 'chunk',
                                         encoding: 'base64',
@@ -109,10 +141,18 @@
                                     }));
                                 };
                                 reader.readAsDataURL(event.data);
+                            } else {
+                                console.log('Skipped chunk - size:', event.data.size, 'ws state:', ws.readyState);
                             }
                         };
                         
+                        mediaRecorder.onerror = (error) => {
+                            console.error('MediaRecorder error:', error);
+                            status.textContent = 'Recording error: ' + error;
+                        };
+                        
                         mediaRecorder.start(1000); // Send chunks every second
+                        console.log('MediaRecorder started');
                         isStreaming = true;
                         btn.textContent = 'Stop Streaming';
                         btn.classList.add('streaming');
@@ -120,11 +160,15 @@
                     };
                     
                     ws.onmessage = (event) => {
+                        console.log('Received:', event.data);
                         const data = JSON.parse(event.data);
                         if (data.type === 'interim' || data.type === 'final') {
                             displayLiveResult('transcriptionResult', data);
                         } else if (data.type === 'error') {
                             console.error('WebSocket error:', data.detail);
+                            status.textContent = 'Error: ' + data.detail;
+                        } else if (data.type === 'config_ack') {
+                            console.log('Config acknowledged:', data.config);
                         }
                     };
                     
@@ -142,7 +186,7 @@
                     };
                     
                 } catch (err) {
-                    status.textContent = 'Microphone access failed. Use file upload instead.';
+                    status.textContent = 'Error: ' + err.message;
                     console.error(err);
                 }
             } else {

@@ -1,6 +1,7 @@
 import io
 import os
 import tempfile
+import subprocess
 
 import librosa
 import numpy as np
@@ -19,8 +20,41 @@ def load_audio_data(audio_data: bytes, sr: int = 16000) -> np.ndarray:
     Returns:
         Audio array as numpy array
     """
+    # Validate minimum data size
+    if len(audio_data) < 100:
+        return np.array([], dtype=np.float32)
+    
+    # Try ffmpeg first for WebM/Opus/MP4 support (streaming audio)
     try:
-        # Try direct BytesIO loading first
+        with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as temp_in:
+            temp_in.write(audio_data)
+            temp_in.flush()
+            temp_in_path = temp_in.name
+        
+        try:
+            # Use ffmpeg with optimized settings for streaming
+            result = subprocess.run([
+                'ffmpeg', '-loglevel', 'error',
+                '-i', temp_in_path,
+                '-ar', str(sr), '-ac', '1',
+                '-f', 'wav', '-'
+            ], capture_output=True, timeout=10, check=False)
+            
+            if result.returncode == 0 and len(result.stdout) > 44:
+                audio_array, _ = librosa.load(io.BytesIO(result.stdout), sr=sr, mono=True)
+                if len(audio_array) > 0:
+                    logger.debug(f"Audio loaded via ffmpeg: {len(audio_array)} samples")
+                    return audio_array
+        finally:
+            try:
+                os.unlink(temp_in_path)
+            except:
+                pass
+    except Exception as e:
+        logger.debug(f"ffmpeg decode failed: {e}")
+    
+    # Fallback to librosa direct loading
+    try:
         audio_array, _ = librosa.load(io.BytesIO(audio_data), sr=sr)
         logger.debug("Audio loaded successfully via BytesIO")
         return audio_array

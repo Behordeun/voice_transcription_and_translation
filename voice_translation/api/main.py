@@ -10,6 +10,8 @@ from .security import SecurityMiddleware
 import json
 import base64
 import numpy as np
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 load_dotenv()
 
@@ -19,6 +21,7 @@ logger.info("Starting Voice Translation API", {"version": "1.0.0"})
 
 try:
     processor = VoiceProcessor()
+    executor = ThreadPoolExecutor(max_workers=4)
     logger.info("VoiceProcessor initialized successfully")
 except Exception as e:
     logger.error(e, {"component": "processor_initialization"}, exc_info=True)
@@ -347,55 +350,94 @@ class _WSHandler:
 
         try:
             chunk = base64.b64decode(chunk_b64)
+            logger.debug(f"Received chunk: {len(chunk)} bytes, buffer: {len(self.buffer_bytes)} bytes")
         except Exception:
             await self.send_json({"type": "error", "detail": "invalid_base64"})
             return
 
         self.buffer_bytes.extend(chunk)
-        await self._maybe_send_interim()
+        # Process every 3 chunks (~3 seconds) for better accuracy
+        if len(self.buffer_bytes) >= 45000:
+            await self._maybe_send_interim()
 
     async def _maybe_send_interim(self):
-        # If buffer is reasonably large, attempt to load and transcribe
-        if len(self.buffer_bytes) <= 16000 * 1:
-            return
-
-        audio_array = load_audio_data(bytes(self.buffer_bytes), sr=16000)
-        if getattr(audio_array, "size", 0) > 0:
-            text, detected = processor.transcribe_audio(audio_array, self.config.get("source_language"))
+        try:
+            # Run audio loading in thread pool
+            loop = asyncio.get_event_loop()
+            audio_array = await loop.run_in_executor(executor, load_audio_data, bytes(self.buffer_bytes), 16000)
+            
+            if audio_array is None or len(audio_array) == 0:
+                logger.debug(f"No audio decoded from {len(self.buffer_bytes)} bytes buffer")
+                return
+            
+            # Skip if audio too short (< 0.5s)
+            if len(audio_array) < 8000:
+                logger.debug(f"Audio too short: {len(audio_array)} samples")
+                return
+            
+            # Run transcription in thread pool
+            text, detected = await loop.run_in_executor(
+                executor, 
+                processor.transcribe_audio, 
+                audio_array, 
+                self.config.get("source_language")
+            )
+            
             if text and text.strip():
                 await self.send_json({"type": "interim", "text": text, "detected_language": detected})
-
-        # keep a sliding window: drop older half to reduce latency (in-place)
-        keep_from = int(len(self.buffer_bytes) / 2)
-        del self.buffer_bytes[:keep_from]
+                logger.info(f"Interim result: {text[:50]}...")
+        except Exception as e:
+            logger.error(f"Error in interim processing: {e}", exc_info=True)
+        finally:
+            # Clear buffer after processing to avoid memory buildup
+            self.buffer_bytes.clear()
 
     async def handle_flush(self):
-        audio_array = load_audio_data(bytes(self.buffer_bytes), sr=16000)
-        if getattr(audio_array, "size", 0) == 0:
+        try:
+            loop = asyncio.get_event_loop()
+            audio_array = await loop.run_in_executor(executor, load_audio_data, bytes(self.buffer_bytes), 16000)
+            
+            if audio_array is None or len(audio_array) == 0:
+                await self.send_json({
+                    "type": "final",
+                    "original_text": "",
+                    "translated_text": "",
+                    "detected_language": "unknown",
+                    "target_language": self.config.get("target_language")
+                })
+                self.buffer_bytes.clear()
+                return
+
+            text, detected = await loop.run_in_executor(
+                executor,
+                processor.transcribe_audio,
+                audio_array,
+                self.config.get("source_language")
+            )
+            
+            translated_text = text
+            tgt = self.config.get("target_language")
+            if tgt and detected != tgt and text.strip():
+                translated_text = await loop.run_in_executor(
+                    executor,
+                    processor.translate_text,
+                    text,
+                    detected,
+                    tgt
+                )
+
             await self.send_json({
                 "type": "final",
-                "original_text": "",
-                "translated_text": "",
-                "detected_language": "unknown",
-                "target_language": self.config.get("target_language")
+                "original_text": text,
+                "translated_text": translated_text,
+                "detected_language": detected,
+                "target_language": tgt,
             })
+        except Exception as e:
+            logger.error(f"Error in flush processing: {e}", exc_info=True)
+            await self.send_json({"type": "error", "detail": str(e)})
+        finally:
             self.buffer_bytes.clear()
-            return
-
-        text, detected = processor.transcribe_audio(audio_array, self.config.get("source_language"))
-        translated_text = text
-        tgt = self.config.get("target_language")
-        if tgt and detected != tgt and text.strip():
-            translated_text = processor.translate_text(text, detected, tgt)
-
-        await self.send_json({
-            "type": "final",
-            "original_text": text,
-            "translated_text": translated_text,
-            "detected_language": detected,
-            "target_language": tgt,
-        })
-        self.buffer_bytes.clear()
 
     async def process_text_message(self, msg: str):
         """Parse incoming text message and dispatch to appropriate handler.

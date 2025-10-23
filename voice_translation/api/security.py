@@ -20,12 +20,13 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         client_ip = request.client.host
         path = request.url.path
         
-        # Allow static files and root
-        if path == "/" or path.startswith("/static/"):
+        # Allow static files, root, and WebSocket without rate limiting
+        if path == "/" or path.startswith("/static/") or path.startswith("/ws/"):
             response = await call_next(request)
-            response.headers["X-Content-Type-Options"] = "nosniff"
-            response.headers["X-Frame-Options"] = "DENY"
-            response.headers["X-XSS-Protection"] = "1; mode=block"
+            if not path.startswith("/ws/"):
+                response.headers["X-Content-Type-Options"] = "nosniff"
+                response.headers["X-Frame-Options"] = "DENY"
+                response.headers["X-XSS-Protection"] = "1; mode=block"
             return response
         
         # Block suspicious paths
