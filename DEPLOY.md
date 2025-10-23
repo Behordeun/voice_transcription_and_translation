@@ -83,3 +83,6 @@ curl -X POST http://localhost:8000/transcribe \
 ✅ Removed health check logging
 ✅ Increased translation token limits (256→512)
 ✅ Added soundfile package
+✅ Security middleware (rate limiting + path blocking)
+✅ Security headers (XSS, HSTS, frame protection)
+✅ Filler word removal (um, uh, yeah, okay, etc.)

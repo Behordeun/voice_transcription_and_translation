@@ -6,6 +6,7 @@ from fastapi.staticfiles import StaticFiles
 from ..core.audio_utils import load_audio_data
 from ..core.error_trace import logger
 from ..core.processor import VoiceProcessor
+from .security import SecurityMiddleware
 import json
 import base64
 import numpy as np
@@ -13,6 +14,7 @@ import numpy as np
 load_dotenv()
 
 app = FastAPI(title="Voice Translation API", version="1.0.0")
+app.add_middleware(SecurityMiddleware)
 logger.info("Starting Voice Translation API", {"version": "1.0.0"})
 
 try:

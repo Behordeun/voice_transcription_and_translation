@@ -132,22 +132,7 @@ class VoiceProcessor:
         # Fallback to single speaker
         return {"speaker_0": [audio_data]}
 
-    def _clean_transcription(self, text):
-        """Clean transcription text by removing unwanted delimiters and artifacts"""
-        if not text:
-            return text
-        
-        # Remove multiple consecutive slashes (2 or more) with surrounding spaces
-        # This handles: / /, / / /, / / / /, etc.
-        text = re.sub(r'(\s*/\s*){2,}', ' ', text)
-        
-        # Remove multiple spaces
-        text = re.sub(r'\s+', ' ', text)
-        
-        # Clean up spacing around punctuation
-        text = re.sub(r'\s+([.,!?;:])', r'\1', text)
-        
-        return text.strip()
+
 
     def transcribe_audio(self, audio_data, language=None):
         try:
@@ -173,10 +158,10 @@ class VoiceProcessor:
                     no_speech_threshold=0.6,
                     logprob_threshold=-1.0,
                     compression_ratio_threshold=2.4,
+                    condition_on_previous_text=False,
                 )
 
             text = result["text"].strip()
-            text = self._clean_transcription(text)  # Clean the transcription
             detected_lang = result.get("language", "en")
 
             # Validate detected language
@@ -197,18 +182,52 @@ class VoiceProcessor:
             if detected_lang not in valid_languages:
                 detected_lang = "en"
 
+            # Clean transcription
+            text = self._clean_text(text)
             return text, detected_lang
         except Exception as e:
             logger.error(e, {"component": "transcription"}, exc_info=True)
             return "", "unknown"
+    
+    def _clean_text(self, text):
+        """Clean text by removing filler words only when clearly non-meaningful"""
+        if not text:
+            return text
+        
+        # Remove slash patterns
+        text = re.sub(r'(\s*/\s*){2,}', ' ', text)
+        
+        # Only remove fillers that are:
+        # 1. At start of sentence (after . ! ? or beginning)
+        # 2. Followed by comma or period
+        # 3. Standalone between punctuation
+        
+        # Pattern: (sentence boundary) filler (comma/period)
+        text = re.sub(r'(?:^|(?<=[.!?])\s+)(um+|uh+|ah+|er+|hmm+|uh-huh|mm-hmm|yeah|yep)[.,]?\s+', ' ', text, flags=re.IGNORECASE)
+        text = re.sub(r'\s+(um+|uh+|ah+|er+|hmm+)[.,]\s+', ' ', text, flags=re.IGNORECASE)
+        
+        # Remove only when clearly filler usage (with comma)
+        text = re.sub(r',\s*(okay|ok|yeah|right|well|so|like)\s*,', ',', text, flags=re.IGNORECASE)
+        
+        # Arabic fillers - same conservative approach
+        text = re.sub(r'(?:^|(?<=[؟.!?])\s+)(أه|آه|إيه|ممم|هممم)[،.]?\s+', ' ', text)
+        text = re.sub(r'\s+(أه|آه|ممم)[،.]\s+', ' ', text)
+        text = re.sub(r'،\s*(أجل|حسناً|طيب)\s*،', '،', text)
+        
+        # Remove standalone punctuation
+        text = re.sub(r'\s+[.,!?;:؟،]+\s+', ' ', text)
+        
+        # Fix spacing
+        text = re.sub(r'\s{2,}', ' ', text)
+        text = re.sub(r'\s+([.,!?;:؟،])', r'\1', text)
+        text = re.sub(r'([.,!?;:])([A-Z])', r'\1 \2', text)
+        
+        return text.strip()
 
     def translate_text(self, text, src_lang, tgt_lang):
         # Quick validation
         if not text or not text.strip() or src_lang == tgt_lang:
             return text
-
-        # Clean input text before translation
-        text = self._clean_transcription(text)
 
         model_key = f"{src_lang}-{tgt_lang}"
 
@@ -246,8 +265,7 @@ class VoiceProcessor:
                     translated_parts.append(translated)
 
             result = ' '.join(translated_parts) if translated_parts else text
-            # Clean the translated output as well
-            return self._clean_transcription(result)
+            return result
 
         except Exception as e:
             logger.error(e, {"component": "translation"})
